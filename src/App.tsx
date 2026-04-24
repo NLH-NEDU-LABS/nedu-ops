@@ -1,4 +1,20 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useLeads, useAdvanceStage, useCreateEnrollment, useCreateNote, useUpdateNote, useDeleteNote, useLeadActions, useLeadNotes, useUpdateLead, useTransferLead, useCreateCoDeal, usePersonalProfile, useGeneratePersonalProfile, useKpiTeam } from '@modules/ops/hooks/useLeads';
+import { useQueryClient } from '@tanstack/react-query';
+import type { KpiTeamMember } from '@modules/ops/types';
+import { useLeadStream } from '@modules/ops/hooks/useLeadStream';
+import { useCatchUpNotifications } from '@modules/ops/hooks/useCatchUpNotifications';
+import { useAuthStore } from '@modules/auth/stores/useAuthStore';
+import { useNotificationStore } from '@shared/stores/notification-store';
+import type { Lead as BackendLead, LeadTemperature, PipelineStage, ProgramSlug, PaymentMethod, PipelineAction, PersonalProfile as BackendPersonalProfile } from '@modules/ops/types';
+
+const COURSE_TO_PROGRAM: Record<string, ProgramSlug> = {
+  lcm: 'la-chinh-minh', adult: 'adult-learning', exec: 'executive',
+  short: 'short-course', corp: 'corporate',
+};
+const PAY_METHOD_MAP: Record<string, PaymentMethod> = {
+  transfer: 'bank_transfer', card: 'credit_card', momo: 'e_wallet', wallet: 'e_wallet',
+};
 
 // ─── CONSTANTS ───────────────────────────────────────
 const S_NAMES = ['Awareness','Interest','Consideration','Intent','Enrolled','Retention'];
@@ -66,9 +82,9 @@ const COURSES = [
   {id:'corp',  name:'Corporate',        emoji:'🏢', desc:'Doanh nghiệp'},
 ];
 
-type Profile = {dob:string; birthTime:string; job:string; goal:string; pain:string};
+type Profile = {dob:string; birthTime:string; job:string; goal:string; pain:string; gender?:'male'|'female'};
 type TLItem = {icon?:string; action?:string; date?:string; who?:string; note?:string; isDivider?:boolean; label?:string};
-type NoteItem = {text:string; date:string; who:string};
+type NoteItem = {text:string; date:string; who:string; id?:string};
 type Todo = {
   id:number; priority:string; action:string; name:string;
   badge:string; badgeColor:string; desc:string; stage:number;
@@ -76,24 +92,33 @@ type Todo = {
   color:string; days:number; testScore:number; testDesc:string;
   note:string; profile:Profile; courses:string[];
   timeline:TLItem[]; notes:NoteItem[]; done:boolean;
+  temperature?:LeadTemperature;
+  aiProfileConsent?:boolean;
   codeal?:{name:string,split:number}[];
   assignedTo?:string; payment?:any;
 };
 type ProfileCard = {
-  gen:boolean; dm:string; lp:string; nk:string; gua:string;
+  gen:boolean;
+  // 5-system chip snapshot
+  dm:string;      // Bát tự — Day Master (nhut_chu)
+  lp:string;      // Thần số học — Life Path
+  nk:string;      // Nine Star Ki — year star
+  sun:string;     // Cung hoàng đạo — Sun sign
+  menh:string;    // Tử vi — Mệnh Cục
+  gua:string;     // (legacy, giữ lại cho compat)
   q:string; core:string; talk:{y:boolean,t:string}[];
   need:string; timing:string; opening:string;
 };
 
 const PROFILE_CARDS_INIT: Record<number, ProfileCard> = {
-  4:{gen:true,dm:'Giáp Mộc 甲',lp:'6',nk:'Sao 1 Thủy',gua:'7',
+  4:{gen:true,dm:'Giáp Mộc 甲',lp:'6',nk:'Sao 1 Thủy',sun:'Xử Nữ',menh:'Mộc Tam Cục',gua:'7',
      q:'"Cây đại thụ tìm gốc rễ — thành công bên ngoài, trống rỗng bên trong."',
      core:'Giáp Mộc nhật chủ — lãnh đạo bẩm sinh, thẳng thắn. Cần được tôn trọng. Bên ngoài mạnh nhưng thiếu kết nối chiều sâu.',
      talk:[{y:true,t:'<strong>Nói thẳng, không vòng vo.</strong> Dùng "kết quả", "ROI", "hệ thống".'},{y:true,t:'<strong>Tôn trọng trí tuệ.</strong> Không giải thích quá kỹ.'},{y:false,t:'<strong>Tránh:</strong> "cảm xúc", "chữa lành". Thay bằng "kết nối nội tâm", "lãnh đạo minh mẫn".'}],
      need:'CEO thành đạt nhưng cô đơn trong vai trò. Đội nhóm sợ, gia đình xa cách. Muốn tìm ý nghĩa thật sự.',
      timing:'2026: Sao 1 vào Trung Cung — năm bước ngoặt nội tâm lớn nhất 9 năm qua.',
      opening:'"Anh Nam, anh không cần thêm kiến thức kinh doanh. Điều anh đang tìm là đội nhóm thật sự tin anh, và gia đình cảm nhận được anh đang hiện diện với họ."'},
-  6:{gen:true,dm:'Đinh Hỏa 丁',lp:'9',nk:'Sao 3 Chấn',gua:'2',
+  6:{gen:true,dm:'Đinh Hỏa 丁',lp:'9',nk:'Sao 3 Chấn',sun:'Sư Tử',menh:'Hỏa Lục Cục',gua:'2',
      q:'"Ngọn nến đã cháy lại — lần này chính mình thắp."',
      core:'Đinh Hỏa — ngọn nến ấm, sâu. Năm 2022 Thủy vượng (cảm xúc lấn át). 2026 Sao 3 Chấn — Mộc sinh Hỏa — lần đầu thật sự sẵn sàng từ bên trong.',
      talk:[{y:true,t:'<strong>Thừa nhận quá khứ:</strong> "Em biết anh đã tìm hiểu từ trước..."'},{y:true,t:'<strong>Nhấn mạnh sự thay đổi thời điểm.</strong> "Năm 2022 khác. Năm nay khác."'},{y:false,t:'<strong>Tránh:</strong> Ép quyết định nhanh. Anh đã chờ 3 năm — không phải quyết định bốc đồng.'}],
@@ -101,6 +126,117 @@ const PROFILE_CARDS_INIT: Record<number, ProfileCard> = {
      timing:'2026: Personal Year 9 — kết thúc chu kỳ 9 năm. Năm "dứt điểm những gì chưa hoàn thành".',
      opening:'"Anh Phúc, em thấy anh đã tìm hiểu từ 2022. Em tò mò — điều gì đã khiến anh quay lại đúng thời điểm này?"'},
 };
+
+function actionIconOf(type: PipelineAction['action_type']): string {
+  switch (type) {
+    case 'stage_advanced': return '➡️';
+    case 'stage_regressed': return '↩️';
+    case 'note_added': return '📝';
+    case 'lead_assigned': return '📥';
+    case 'lead_transferred': return '↔️';
+    case 'co_deal_created': return '🤝';
+    case 'enrolled': return '✅';
+    case 'profile_updated': return '🧩';
+    case 'ai_profile_generated': return '✨';
+    default: return '•';
+  }
+}
+function actionLabelOf(a: PipelineAction): string {
+  switch (a.action_type) {
+    case 'stage_advanced': return `Tiến stage: ${a.stage_from} → ${a.stage_to}`;
+    case 'stage_regressed': return `Lùi stage: ${a.stage_from} → ${a.stage_to}`;
+    case 'note_added': return 'Ghi chú cho người kế tiếp';
+    case 'lead_assigned': return 'Được giao';
+    case 'lead_transferred': return 'Chuyển case';
+    case 'co_deal_created': return 'Tạo co-deal';
+    case 'enrolled': return 'Enrolled';
+    case 'profile_updated': return 'Cập nhật hồ sơ';
+    case 'ai_profile_generated': return 'Tạo Personal Profile';
+    default: return a.action_type;
+  }
+}
+
+// ─── Backend Lead → Todo mapper ──────────────────────
+// Backend trả UUID string; UI gốc dùng id:number. Giữ bảng map bên ngoài để
+// các mutation sau biết UUID thật khi cần.
+const UUID_BY_NUMERIC_ID: Record<number, string> = {};
+const NUMERIC_ID_BY_UUID: Record<string, number> = {};
+let __NEXT_NUMERIC_ID = 1;
+function numericIdFor(uuid: string): number {
+  if (uuid in NUMERIC_ID_BY_UUID) return NUMERIC_ID_BY_UUID[uuid];
+  const n = __NEXT_NUMERIC_ID++;
+  NUMERIC_ID_BY_UUID[uuid] = n;
+  UUID_BY_NUMERIC_ID[n] = uuid;
+  return n;
+}
+
+const STAGE_TO_NUM: Record<PipelineStage, number> = {
+  awareness: 1, interest: 2, consideration: 3, intent: 4, enrolled: 5, retention: 6,
+};
+
+const PROGRAM_TO_COURSE: Record<string, string> = {
+  'la-chinh-minh': 'lcm', 'adult-learning': 'adult',
+  'executive': 'exec', 'short-course': 'short', 'corporate': 'corp',
+};
+
+const STAGE_COLOR: Record<number, string> = {
+  1: '#EF4444', 2: '#F59E0B', 3: '#8B5CF6', 4: '#06B6D4', 5: '#059669', 6: '#3B82F6',
+};
+
+// Sync với backend CONSULTANT_MAX_ACTIVE_LEADS — leader cảnh báo khi vượt.
+const LOAD_CAPACITY = 20;
+
+function leadToTodo(lead: BackendLead): Todo {
+  const stage = STAGE_TO_NUM[lead.stage] ?? 1;
+  const isMarketing = lead.source === 'marketing';
+  const priority = lead.sla_breached || stage <= 2 ? 'urgent' : 'today';
+  const badge = lead.sla_breached
+    ? `⚠ Quá hạn${lead.sla_breach_hours ? ' ' + lead.sla_breach_hours + 'h' : ''}`
+    : lead.is_returning ? '🔄 Khách cũ'
+    : isMarketing ? '📢 Marketing'
+    : `Stage ${stage}`;
+  const badgeColor = lead.sla_breached ? 'red'
+    : lead.is_returning ? 'amber'
+    : isMarketing ? 'blue'
+    : stage >= 4 ? 'green' : 'purple';
+  const action = stage === 4 ? 'CHỐT DEAL' : stage >= 3 ? 'TƯ VẤN' : 'GỌI NGAY';
+  const createdAt = new Date(lead.created_at);
+  const now = new Date();
+  const days = Math.max(0, Math.floor((now.getTime() - createdAt.getTime()) / 86400000));
+
+  return {
+    id: numericIdFor(lead.id),
+    priority, action,
+    name: lead.full_name,
+    badge, badgeColor,
+    desc: lead.main_concern ?? lead.goal ?? '',
+    stage,
+    phone: lead.phone,
+    email: lead.email ?? '',
+    sourceType: isMarketing ? 'marketing' : 'inbound',
+    sourceCh: isMarketing ? 'Marketing campaign' : 'nedu.vn/test',
+    color: STAGE_COLOR[stage] ?? '#8B5CF6',
+    days,
+    testScore: lead.test_score ?? 0,
+    testDesc: lead.test_score ? `Điểm test: ${lead.test_score}/100` : 'Chưa làm test',
+    note: '',
+    profile: {
+      dob: lead.birth_date ?? '',
+      birthTime: lead.birth_time ?? '',
+      job: lead.occupation ?? '',
+      goal: lead.goal ?? '',
+      pain: lead.main_concern ?? '',
+      gender: lead.metadata?.gender as ('male'|'female'|undefined),
+    },
+    courses: lead.interested_programs.map(p => PROGRAM_TO_COURSE[p]).filter(Boolean),
+    timeline: [],
+    notes: [],
+    done: lead.stage === 'enrolled' || lead.stage === 'retention',
+    temperature: lead.metadata?.temperature,
+    aiProfileConsent: lead.ai_profile_consent,
+    assignedTo: lead.assigned_to_full_name,
+  };
+}
 
 const INIT_TODOS: Todo[] = [
   {id:6,priority:'urgent',action:'GỌI NGAY',name:'Lê Minh Phúc',
@@ -176,14 +312,39 @@ const INIT_TODOS: Todo[] = [
    ],notes:[{text:'Chị ĐÃ quyết định — KHÔNG tư vấn thêm. Chỉ nhắn hỏi thăm nhẹ nhàng, tránh tạo áp lực. Đợi 15/4.',date:'04/04/2026',who:'Linh Nguyễn'}],done:false},
 ];
 
-const TEAM_MEMBERS = [
-  {id:'linh',name:'Linh Nguyễn',role:'consultant',color:'#059669',enrolled:2,target:5,revenue:140000000,isMe:true},
-  {id:'huong',name:'Hương Nguyễn',role:'consultant',color:'#3B82F6',enrolled:4,target:5,revenue:280000000},
-  {id:'lan',name:'Lan Phạm',role:'consultant',color:'#EC4899',enrolled:3,target:5,revenue:210000000},
-  {id:'duc',name:'Đức Võ',role:'consultant',color:'#F59E0B',enrolled:1,target:5,revenue:70000000},
-  {id:'minh-leader',name:'Minh Trần',role:'leader',color:'#7C3AED',enrolled:1,target:3,revenue:70000000},
-  {id:'hoa-leader',name:'Hoa Lê',role:'leader',color:'#D97706',enrolled:2,target:3,revenue:140000000},
-];
+// Palette dùng cho avatar trong Team KPI leaderboard. Map deterministic theo
+// hash của user_id để mỗi member có 1 màu cố định qua các lần render.
+const TEAM_AVATAR_PALETTE = ['#3B82F6','#EC4899','#059669','#F59E0B','#D97706','#7C3AED','#0EA5E9','#EF4444'];
+function pickAvatarColor(userId: string): string {
+  let h = 0;
+  for (let i = 0; i < userId.length; i++) h = (h * 31 + userId.charCodeAt(i)) | 0;
+  return TEAM_AVATAR_PALETTE[Math.abs(h) % TEAM_AVATAR_PALETTE.length];
+}
+
+interface DisplayTeamMember {
+  id: string;
+  name: string;
+  role: 'consultant' | 'leader';
+  color: string;
+  enrolled: number;
+  target: number;
+  revenue: number;
+  isMe: boolean;
+}
+
+function toDisplayMembers(members: KpiTeamMember[] | undefined): DisplayTeamMember[] {
+  if (!members) return [];
+  return members.map(m => ({
+    id: m.user_id,
+    name: m.full_name,
+    role: m.role,
+    color: pickAvatarColor(m.user_id),
+    enrolled: m.enrolled_count,
+    target: m.target,
+    revenue: m.revenue_vnd,
+    isMe: m.is_me,
+  }));
+}
 
 // ─── HELPERS ─────────────────────────────────────────
 function nowStr() {
@@ -209,7 +370,84 @@ function buildHintTxt(t: Todo) {
 
 // ─── MAIN APP ─────────────────────────────────────────
 export default function App() {
+  // Load leads từ API. Khi data về, bootstrap vào state todos để UI local vẫn
+  // hoạt động bình thường (mutations chưa wire — v/c sẽ làm sau).
+  const { data: leads, isLoading: leadsLoading, error: leadsError } = useLeads();
+  const advanceStageM = useAdvanceStage();
+  const enrollM = useCreateEnrollment();
+  const transferM = useTransferLead();
+  const coDealM = useCreateCoDeal();
+  const genProfileM = useGeneratePersonalProfile();
+
+  // Auth user + logout menu
+  const { user, logout } = useAuthStore();
+  const [showUserMenu, setShowUserMenu] = useState(false);
+  const userMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!showUserMenu) return;
+    const onClick = (e: MouseEvent) => {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) {
+        setShowUserMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', onClick);
+    return () => document.removeEventListener('mousedown', onClick);
+  }, [showUserMenu]);
+  async function handleLogout() {
+    setShowUserMenu(false);
+    await logout();
+    window.location.href = '/login';
+  }
+  const userInitial = (user?.full_name?.trim()?.[0] ?? user?.email?.[0] ?? '?').toUpperCase();
+  const userFirstName = user?.full_name?.trim().split(/\s+/).pop() ?? 'bạn';
+  const createNoteM = useCreateNote();
+  const updateNoteM = useUpdateNote();
+  const deleteNoteM = useDeleteNote();
+  const updateLeadM = useUpdateLead();
+  const mappedTodos = useMemo<Todo[]>(() => (leads ?? []).map(leadToTodo), [leads]);
+
   const [todos, setTodos] = useState<Todo[]>(INIT_TODOS);
+  const [todosBootstrapped, setTodosBootstrapped] = useState(false);
+  useEffect(() => {
+    if (mappedTodos.length === 0) return;
+    if (!todosBootstrapped) {
+      setTodos(mappedTodos);
+      setTodosBootstrapped(true);
+      return;
+    }
+    // Sync backend-owned fields khi refetch, giữ local-only fields.
+    setTodos(prev => {
+      const byId = new Map(mappedTodos.map(m => [m.id, m]));
+      const merged = prev.map(old => {
+        const fresh = byId.get(old.id);
+        if (!fresh) return old;
+        return {
+          ...old,
+          stage: fresh.stage,
+          name: fresh.name,
+          phone: fresh.phone,
+          email: fresh.email,
+          badge: fresh.badge,
+          badgeColor: fresh.badgeColor,
+          priority: fresh.priority,
+          action: fresh.action,
+          desc: fresh.desc,
+          color: fresh.color,
+          testScore: fresh.testScore,
+          testDesc: fresh.testDesc,
+          profile: fresh.profile,
+          courses: fresh.courses,
+          assignedTo: fresh.assignedTo,
+          done: fresh.done,
+        };
+      });
+      // Thêm lead mới nếu có
+      const existingIds = new Set(prev.map(p => p.id));
+      const added = mappedTodos.filter(m => !existingIds.has(m.id));
+      return [...merged, ...added];
+    });
+  }, [mappedTodos, todosBootstrapped]);
+
   const [profileCards, setProfileCards] = useState<Record<number,ProfileCard>>(PROFILE_CARDS_INIT);
   const [activeId, setActiveId] = useState<number|null>(null);
   const [guideChecks, setGuideChecks] = useState<Record<number,Record<number,boolean>>>({});
@@ -231,9 +469,11 @@ export default function App() {
   const [editingFields, setEditingFields] = useState<Record<string,boolean>>({});
   const [profileDirty, setProfileDirty] = useState(false);
   const [generatingProfile, setGeneratingProfile] = useState(false);
-  // Toast
-  const [toast, setToast] = useState<{icon:string,text:string,sub:string}|null>(null);
-  const toastTimer = useRef<ReturnType<typeof setTimeout>|null>(null);
+  // Toast: state lifted sang shared notification store. Cùng 1 UI dùng cho
+  // (a) local action feedback (save, delete, ...) qua showToast local wrapper
+  // (b) BE notifications từ useLeadStream + useCatchUpNotifications.
+  const toast = useNotificationStore((s) => s.current);
+  const pushToast = useNotificationStore((s) => s.push);
   // Enroll payment
   const [payMethod, setPayMethod] = useState('transfer');
   const [payCourse, setPayCourse] = useState('lcm');
@@ -250,19 +490,26 @@ export default function App() {
   const [editingNotes, setEditingNotes] = useState<Record<string,string>>({});
   // Confetti
   const [confetti, setConfetti] = useState<{id:number,left:number,color:string,size:number,dur:number,delay:number,round:boolean}[]>([]);
-  // Team data (for KPI enrolled updates)
-  const [teamMembers, setTeamMembers] = useState(TEAM_MEMBERS.map(m => ({...m})));
+  // E-08 — Team KPI. Chỉ fetch khi panel mở (giữ panel đóng = ko tốn request).
+  const qc = useQueryClient();
+  const kpiTeamQuery = useKpiTeam(undefined, showKPI);
+  const teamMembers = useMemo(
+    () => toDisplayMembers(kpiTeamQuery.data?.members),
+    [kpiTeamQuery.data],
+  );
 
   const showToast = useCallback((icon: string, text: string, sub: string) => {
-    setToast({icon,text,sub});
-    if (toastTimer.current) clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(null), 3500);
-  }, []);
+    pushToast({ icon, text, sub });
+  }, [pushToast]);
 
   useEffect(() => {
     setTimeout(() => setActiveId(6), 350);
-    setTimeout(() => showToast('📢','Marketing Team','Vũ Thị Phương — lead mới từ Facebook Ads Campaign T4'), 4000);
-  }, [showToast]);
+  }, []);
+
+  // BE notifications: SSE stream + catch-up khi mở app. Gate theo auth user.
+  const authUser = useAuthStore((s) => s.user);
+  useLeadStream(!!authUser);
+  useCatchUpNotifications(!!authUser);
 
   const updateTodo = useCallback((id: number, updater: (t: Todo) => Todo) => {
     setTodos(prev => prev.map(t => t.id === id ? updater(t) : t));
@@ -275,29 +522,58 @@ export default function App() {
     const t = getTodo(activeId!); if (!t || t.stage >= 6) return;
     if (t.stage === 4) { openEnroll(t.id); return; }
     const newStage = t.stage + 1;
+    const uuid = UUID_BY_NUMERIC_ID[t.id];
+    // Optimistic local update (giữ UX tức thời).
     updateTodo(t.id, old => ({
       ...old, stage: newStage,
       timeline: [{icon:S_ICONS[newStage-1],action:`Chuyển sang ${S_NAMES[newStage-1]}`,date:nowStr(),who:'Linh Nguyễn',note:''}, ...old.timeline]
     }));
     showToast('→', `Chuyển sang ${S_NAMES[newStage-1]}`, t.name);
+    if (!uuid) return; // lead t\u1ea1o local t\u1eeb INIT_TODOS, kh\u00f4ng c\u00f3 UUID backend
+    advanceStageM.mutate(
+      { leadId: uuid, direction: 'forward' },
+      {
+        onError: (err) => {
+          // Rollback
+          updateTodo(t.id, old => ({ ...old, stage: t.stage }));
+          alert('Tiến stage thất bại: ' + (err instanceof Error ? err.message : 'Unknown error'));
+        },
+      },
+    );
   }
 
+  // Stage 5 = Enrolled — không cho back về Intent (rule: enrolled là quyết định
+  // dứt khoát, đã ghi nhận thanh toán; muốn revert phải mở case riêng).
+  function canGoBack(stage: number) {
+    return stage > 1 && stage !== 5;
+  }
   function openBackPopover() {
-    const t = getTodo(activeId!); if (!t || t.stage <= 1) return;
+    const t = getTodo(activeId!); if (!t || !canGoBack(t.stage)) return;
     setBackReasonIdx(null); setBackOther('');
     setShowBack(true);
   }
   function executeBack() {
-    const t = getTodo(activeId!); if (!t || t.stage <= 1) { setShowBack(false); return; }
+    const t = getTodo(activeId!); if (!t || !canGoBack(t.stage)) { setShowBack(false); return; }
     let reason = backReasonIdx !== null ? BACK_REASONS[backReasonIdx].label : 'Không rõ lý do';
     if (backReasonIdx === 5 && backOther.trim()) reason = backOther.trim();
     const newStage = t.stage - 1;
+    const uuid = UUID_BY_NUMERIC_ID[t.id];
     updateTodo(t.id, old => ({
       ...old, stage: newStage,
       timeline: [{icon:'↩️',action:`Lùi về ${S_NAMES[newStage-1]}`,date:nowStr(),who:'Linh Nguyễn',note:`Lý do: ${reason}`}, ...old.timeline]
     }));
     setShowBack(false);
     showToast('↩','Đã lùi stage', reason);
+    if (!uuid) return;
+    advanceStageM.mutate(
+      { leadId: uuid, direction: 'back', regression_reason: reason },
+      {
+        onError: (err) => {
+          updateTodo(t.id, old => ({ ...old, stage: t.stage }));
+          alert('Lùi stage thất bại: ' + (err instanceof Error ? err.message : 'Unknown error'));
+        },
+      },
+    );
   }
 
   // ─── CALL SCREEN ───────────────────────────────────
@@ -316,56 +592,142 @@ export default function App() {
 
   // ─── ENROLL ────────────────────────────────────────
   function openEnroll(id: number) {
+    const t = getTodo(id);
+    if (!t) return;
+    if (!t.email || !t.email.trim()) {
+      showToast('⚠️', 'Lead chưa có email', 'Cập nhật email trước khi Enrolled');
+      return;
+    }
     setEnrollId(id); setPayMethod('transfer'); setPayCourse('lcm');
     setPayAmount('70000000'); setPayTxn('');
     setShowEnroll(true);
   }
   function confirmEnroll() {
     const t = getTodo(enrollId!); if (!t) return;
-    setShowEnroll(false);
+    if (!t.email || !t.email.trim()) {
+      setShowEnroll(false);
+      showToast('⚠️', 'Lead chưa có email', 'Cập nhật email trước khi Enrolled');
+      return;
+    }
     const courseMap: Record<string,string> = {lcm:'🌱 Là Chính Mình',adult:'📚 Adult Learning Core',exec:'🎯 Executive Track',short:'⚡ Short Course',corp:'🏢 Corporate'};
     const courseName = courseMap[payCourse]?.split('·')[0]?.trim() || 'Là Chính Mình';
     const amount = parseInt(payAmount) || 70000000;
     const pmLabels: Record<string,string> = {transfer:'Chuyển khoản',card:'Thẻ tín dụng',momo:'Ví điện tử'};
-    updateTodo(t.id, old => ({
-      ...old, stage:5, priority:'week', action:'CHECK-IN', badge:'✅ Enrolled', badgeColor:'green',
-      desc:'Theo dõi trải nghiệm tuần đầu.',
-      payment:{amount, course:courseName, method:pmLabels[payMethod]||'Chuyển khoản', txn:payTxn, date:nowStr()},
-      timeline:[{icon:'✅',action:`ENROLLED — ${courseName}`,date:nowStr(),who:'Linh Nguyễn',note:`${pmLabels[payMethod]||'Chuyển khoản'} · ${amount.toLocaleString('vi-VN')}₫${payTxn?' · Mã: '+payTxn:''}`}, ...old.timeline]
-    }));
-    setTeamMembers(prev => prev.map(m => m.isMe ? {...m, enrolled:m.enrolled+1, revenue:m.revenue+amount} : m));
-    launchConfetti();
-    setActiveId(t.id);
-    setTimeout(() => { setWinData({name:t.name, course:courseName, amount}); setShowWin(true); }, 400);
+    const uuid = UUID_BY_NUMERIC_ID[t.id];
+    const programSlug = COURSE_TO_PROGRAM[payCourse] ?? 'la-chinh-minh';
+    const paymentMethod = PAY_METHOD_MAP[payMethod] ?? 'bank_transfer';
+
+    const applySuccess = () => {
+      updateTodo(t.id, old => ({
+        ...old, stage:5, priority:'week', action:'CHECK-IN', badge:'✅ Enrolled', badgeColor:'green',
+        desc:'Theo dõi trải nghiệm tuần đầu.',
+        payment:{amount, course:courseName, method:pmLabels[payMethod]||'Chuyển khoản', txn:payTxn, date:nowStr()},
+        timeline:[{icon:'✅',action:`ENROLLED — ${courseName}`,date:nowStr(),who:'Linh Nguyễn',note:`${pmLabels[payMethod]||'Chuyển khoản'} · ${amount.toLocaleString('vi-VN')}₫${payTxn?' · Mã: '+payTxn:''}`}, ...old.timeline]
+      }));
+      // KPI sẽ tự refetch lần kế khi panel mở; nếu đang mở, invalidate luôn.
+      qc.invalidateQueries({ queryKey: ['ops', 'kpi', 'team'] });
+      launchConfetti();
+      setActiveId(t.id);
+      setTimeout(() => { setWinData({name:t.name, course:courseName, amount}); setShowWin(true); }, 400);
+    };
+
+    const showError = (msg: string) => {
+      showToast('❌', 'Enrollment thất bại', msg);
+    };
+
+    setShowEnroll(false);
+
+    if (!uuid) {
+      // Lead local (INIT_TODOS fallback), không có UUID backend — chỉ local.
+      applySuccess();
+      return;
+    }
+
+    enrollM.mutate(
+      {
+        leadId: uuid,
+        program_slug: programSlug,
+        payment_amount: amount,
+        payment_method: paymentMethod,
+        transaction_ref: payTxn.trim() || undefined,
+      },
+      {
+        onSuccess: () => {
+          applySuccess();
+        },
+        onError: (err) => {
+          const e = err as { message?: string; code?: string };
+          if (e.code === 'LEAD_EMAIL_REQUIRED_FOR_ENROLLMENT') {
+            showError('Lead chưa có email — cập nhật email trước khi Enrolled.');
+          } else if (e.code === 'LEAD_ALREADY_ENROLLED') {
+            showError('Lead đã enrolled trước đó.');
+          } else {
+            showError(e.message ?? 'Unknown error');
+          }
+        },
+      },
+    );
   }
 
   // ─── XFER ─────────────────────────────────────────
   function openXfer(id: number) {
-    setXferLeadId(id); setXferTab('transfer'); setXferTo('minh-leader');
+    setXferLeadId(id); setXferTab('transfer'); setXferTo('');
     setXferReason(''); setCodealPerson(''); setSplitMe(70); setCodealNote('');
     setShowXfer(true);
   }
   function confirmXfer() {
     const t = getTodo(xferLeadId!); if (!t) return;
+    const uuid = UUID_BY_NUMERIC_ID[t.id];
     if (xferTab === 'codeal') {
       if (!codealPerson) { showToast('⚠','Chọn người đồng hành',''); return; }
-      const personName = codealPerson.split('-').map(w=>w[0].toUpperCase()+w.slice(1)).join(' ');
-      const teamPerson = teamMembers.find(m => m.id === codealPerson);
-      const pName = teamPerson?.name || personName;
+      const teamPerson = apiTeammates.find(m => m.id === codealPerson);
+      const pName = teamPerson?.name || 'Co-dealer';
+      // Optimistic
       updateTodo(t.id, old => ({
         ...old,
         codeal: [...(old.codeal||[]), {name:pName, split:100-splitMe}],
-        timeline:[{icon:'🤝',action:`Co-deal: thêm ${pName} (${100-splitMe}%)`,date:nowStr(),who:'Linh Nguyễn',note:codealNote||`Chia hoa hồng Linh ${splitMe}% / ${pName} ${100-splitMe}%`}, ...old.timeline]
       }));
       showToast('🤝',`Co-deal với ${pName}`,`Hoa hồng: Linh ${splitMe}% · ${pName} ${100-splitMe}%`);
+      if (uuid) {
+        coDealM.mutate(
+          {
+            leadId: uuid,
+            co_dealer_user_id: codealPerson,
+            initiator_ratio: splitMe,
+            co_dealer_ratio: 100 - splitMe,
+            note: codealNote.trim() || undefined,
+          },
+          {
+            onError: (err) => {
+              // Rollback codeal
+              updateTodo(t.id, old => ({ ...old, codeal: (old.codeal||[]).slice(0, -1) }));
+              alert('Co-deal thất bại: ' + (err instanceof Error ? err.message : 'Unknown error'));
+            },
+          },
+        );
+      }
     } else {
-      const toMember = teamMembers.find(m => m.id === xferTo);
-      const toName = toMember?.name || xferTo;
+      if (!xferTo) { showToast('⚠','Chọn người nhận',''); return; }
+      if (!xferReason.trim()) { showToast('⚠','Nhập lý do chuyển',''); return; }
+      const toMember = apiTeammates.find(m => m.id === xferTo);
+      const toName = toMember?.name || 'Teammate';
+      const prevAssigned = t.assignedTo;
+      // Optimistic
       updateTodo(t.id, old => ({
         ...old, assignedTo:toName, priority:'done', done:true,
-        timeline:[{icon:'↔️',action:`Chuyển case → ${toName}`,date:nowStr(),who:'Linh Nguyễn',note:xferReason||'Không có ghi chú'}, ...old.timeline]
       }));
       showToast('↔','Đã chuyển case',`${t.name} → ${toName}`);
+      if (uuid) {
+        transferM.mutate(
+          { leadId: uuid, to_user_id: xferTo, reason: xferReason.trim() },
+          {
+            onError: (err) => {
+              updateTodo(t.id, old => ({ ...old, assignedTo: prevAssigned, priority: 'urgent', done: false }));
+              alert('Chuyển case thất bại: ' + (err instanceof Error ? err.message : 'Unknown error'));
+            },
+          },
+        );
+      }
     }
     setShowXfer(false);
   }
@@ -384,80 +746,270 @@ export default function App() {
   }
 
   // ─── PROFILE FIELD EDITING ─────────────────────────
+  // Map UI profile key -> backend LeadPatchField
+  type LeadPatchField = 'full_name' | 'email' | 'phone' | 'birth_date' | 'birth_time' | 'occupation' | 'goal' | 'main_concern';
+  const PF_KEY_MAP: Record<string, LeadPatchField> = {
+    dob: 'birth_date',
+    birthTime: 'birth_time',
+    job: 'occupation',
+    goal: 'goal',
+    pain: 'main_concern',
+  };
+  const BASIC_KEY_MAP: Record<string, LeadPatchField> = {
+    name: 'full_name',
+    phone: 'phone',
+    email: 'email',
+  };
+
+  function patchLeadField(tid: number, field: LeadPatchField, value: string, label: string) {
+    const uuid = UUID_BY_NUMERIC_ID[tid];
+    if (!uuid) return;
+    updateLeadM.mutate(
+      { leadId: uuid, patch: { [field]: value } as Partial<BackendLead> },
+      {
+        onError: (err) => {
+          alert(`Cập nhật ${label} thất bại: ` + (err instanceof Error ? err.message : 'Unknown error'));
+        },
+      },
+    );
+  }
+
+  // Banner "Hồ sơ đã thay đổi → Cập nhật Profile" chỉ có nghĩa khi đã có
+  // profile generated rồi. Nếu chưa → consultant đang điền lần đầu, không
+  // hiện banner vàng (flow "Tạo Profile" sẽ dẫn).
+  function markDirtyIfGenerated(tid: number) {
+    if (profileCards[tid]?.gen) setProfileDirty(true);
+  }
+
+  function setGender(tid: number, gender: 'male' | 'female') {
+    updateTodo(tid, old => ({ ...old, profile: { ...old.profile, gender } }));
+    markDirtyIfGenerated(tid);
+    const uuid = UUID_BY_NUMERIC_ID[tid];
+    if (!uuid) return;
+    // Backend shallow-merge metadata → chỉ gửi key mình cần ghi.
+    updateLeadM.mutate(
+      { leadId: uuid, patch: { metadata: { gender } } as Partial<BackendLead> },
+      {
+        onError: (err) => {
+          alert('Lưu giới tính thất bại: ' + (err instanceof Error ? err.message : 'Unknown error'));
+        },
+      },
+    );
+  }
+
+  function setConsent(tid: number, consent: boolean) {
+    updateTodo(tid, old => ({ ...old, aiProfileConsent: consent }));
+    const uuid = UUID_BY_NUMERIC_ID[tid];
+    if (!uuid) return;
+    updateLeadM.mutate(
+      { leadId: uuid, patch: { ai_profile_consent: consent } as Partial<BackendLead> },
+      {
+        onError: (err) => {
+          alert('Lưu consent thất bại: ' + (err instanceof Error ? err.message : 'Unknown error'));
+        },
+      },
+    );
+  }
+
   function savePF(tid: number, key: string, val: string) {
+    const trimmed = val.trim();
     updateTodo(tid, old => ({
-      ...old, profile:{...old.profile, [key]:val.trim()}
+      ...old, profile:{...old.profile, [key]:trimmed}
     }));
     setEditingFields(prev => ({...prev, [`${tid}-${key}`]:false}));
-    setProfileDirty(true);
-    if (val.trim()) showToast('✅','Đã lưu', key + ' đã cập nhật');
+    markDirtyIfGenerated(tid);
+    if (trimmed) showToast('✅','Đã lưu', key + ' đã cập nhật');
+    const backendField = PF_KEY_MAP[key];
+    if (!backendField || !trimmed) return;
+    // Normalize dd/mm/yyyy -> yyyy-mm-dd cho birth_date
+    let value = trimmed;
+    if (backendField === 'birth_date') {
+      const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(trimmed);
+      if (m) value = `${m[3]}-${m[2]}-${m[1]}`;
+    }
+    patchLeadField(tid, backendField, value, key);
   }
   function saveBasicField(tid: number, key: string, val: string) {
-    if (!val.trim()) return;
+    const trimmed = val.trim();
+    if (!trimmed) return;
     updateTodo(tid, old => ({
       ...old,
-      name: key==='name' ? val.trim() : old.name,
-      phone: key==='phone' ? val.trim() : old.phone,
-      email: key==='email' ? val.trim() : old.email,
+      name: key==='name' ? trimmed : old.name,
+      phone: key==='phone' ? trimmed : old.phone,
+      email: key==='email' ? trimmed : old.email,
     }));
     setEditingFields(prev => ({...prev, [`basic-${tid}-${key}`]:false}));
-    setProfileDirty(true);
-    showToast('✅','Đã cập nhật', `${key} → ${val.trim()}`);
+    markDirtyIfGenerated(tid);
+    showToast('✅','Đã cập nhật', `${key} → ${trimmed}`);
+    const backendField = BASIC_KEY_MAP[key];
+    if (!backendField) return;
+    patchLeadField(tid, backendField, trimmed, key);
   }
-  function genProfile(id: number) {
+  // force=true khi consultant bấm "↻ Cập nhật Profile" (banner dirty) — ép
+  // regenerate kể cả khi birth data chưa đổi (vault cache theo fingerprint
+  // birth_date/time/tz/location/gender; các field như job/goal/name không
+  // nằm trong fingerprint → cần force để narrative pickup).
+  function genProfile(id: number, force = false) {
+    const uuid = UUID_BY_NUMERIC_ID[id];
     setGeneratingProfile(true);
-    setTimeout(() => {
-      setProfileCards(prev => ({
-        ...prev,
-        [id]:{gen:true,dm:'Nhâm Thủy 壬',lp:'5',nk:'Sao 5 Thổ',gua:'4',
-          q:'"Dòng sông sâu không ồn ào — sức mạnh nằm trong chiều sâu."',
-          core:'Nhâm Thủy nhật chủ — chiều sâu nội tâm lớn. Quyết định bằng cảm nhận + logic. Không bề mặt.',
-          talk:[{y:true,t:'<strong>Cho thời gian suy nghĩ.</strong> Không ép quyết định.'},{y:true,t:'<strong>Nói thật, không tô vẽ.</strong> Nhận ra ngay khi bị nói lệch.'},{y:false,t:'<strong>Tránh:</strong> Áp lực thời gian giả ("chỉ còn 2 chỗ").'}],
-          need:'Đang tìm sự bình yên nội tâm trong bối cảnh thay đổi lớn.',
-          timing:'Sao 5 Thổ 2026 — năm chuyển hóa. Quyết định có tác động dài hạn.',
-          opening:'"Em thấy anh/chị đang ở giai đoạt tìm điều gì đó sâu hơn. Điều đó rất đáng trân trọng."'}
-      }));
-      setGeneratingProfile(false);
-      showToast('✨','Personal Profile đã tạo!','Xem tab Personal Profile');
-    }, 2000);
+    if (!uuid) {
+      // Fallback local (lead không có UUID backend)
+      setTimeout(() => {
+        setProfileCards(prev => ({
+          ...prev,
+          [id]:{gen:true,dm:'Nhâm Thủy 壬',lp:'5',nk:'Sao 5 Thổ',sun:'Cự Giải',menh:'Thủy Nhị Cục',gua:'4',
+            q:'"Dòng sông sâu không ồn ào — sức mạnh nằm trong chiều sâu."',
+            core:'Nhâm Thủy nhật chủ — chiều sâu nội tâm lớn. Quyết định bằng cảm nhận + logic.',
+            talk:[{y:true,t:'<strong>Cho thời gian suy nghĩ.</strong>'},{y:false,t:'<strong>Tránh:</strong> ép quyết định.'}],
+            need:'Đang tìm sự bình yên nội tâm.',
+            timing:'2026 — năm chuyển hóa.',
+            opening:'"Em thấy anh/chị đang tìm điều gì đó sâu hơn..."'}
+        }));
+        setGeneratingProfile(false);
+        showToast('✨','Personal Profile đã tạo!','Xem tab Personal Profile');
+      }, 800);
+      return;
+    }
+    genProfileM.mutate(
+      { leadId: uuid, force },
+      {
+        onSuccess: (result) => {
+          if (result) {
+            setProfileCards(prev => ({ ...prev, [id]: apiToProfileCard(result) }));
+          }
+          setGeneratingProfile(false);
+          setProfileDirty(false); // banner tắt vì profile vừa refresh.
+          showToast(
+            force ? '↻' : '✨',
+            force ? 'Đã cập nhật Profile!' : 'Personal Profile đã tạo!',
+            'Xem tab Personal Profile',
+          );
+        },
+        onError: (err) => {
+          setGeneratingProfile(false);
+          const e = err as { code?: string; message?: string };
+          if (e.code === 'MISSING_BIRTH_DATE') {
+            alert('Cần có ngày sinh để tạo Personal Profile. Điền ngày sinh trong tab Hồ Sơ trước.');
+          } else if (e.code === 'AI_PROFILE_CONSENT_REQUIRED') {
+            alert('Lead chưa đồng ý cho phép tạo Personal Profile — bật toggle Consent trong tab Hồ Sơ.');
+          } else if (e.code === 'MISSING_GENDER') {
+            alert('Cần chọn giới tính (Nam/Nữ) trước khi tạo Personal Profile — chọn trong tab Hồ Sơ.');
+          } else if (e.code === 'VAULT_FACET_NOT_SUPPORTED') {
+            alert('Backend vault chưa hỗ trợ facet này. Liên hệ dev.');
+          } else {
+            alert('Tạo profile thất bại: ' + (e.message ?? 'Unknown error'));
+          }
+        },
+      },
+    );
   }
 
   // ─── NOTES ────────────────────────────────────────
   function sendNote(tid: number, text: string) {
-    if (!text.trim()) return;
-    const note: NoteItem = {text:text.trim(), date:nowStr(), who:'Linh Nguyễn'};
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    const uuid = UUID_BY_NUMERIC_ID[tid];
+    // Optimistic: thêm note vào list ngay, gán id tạm. Khi API OK, update id thật.
+    const tempId = `temp-${Date.now()}`;
+    const note: NoteItem = {text:trimmed, date:nowStr(), who:'Linh Nguyễn', id:tempId};
     updateTodo(tid, old => ({
       ...old,
       notes: [note, ...old.notes],
-      timeline: [{icon:'📝',action:'Ghi chú cho người kế tiếp',date:nowStr(),who:'Linh Nguyễn',note:text.trim()}, ...old.timeline]
+      timeline: [{icon:'📝',action:'Ghi chú cho người kế tiếp',date:nowStr(),who:'Linh Nguyễn',note:trimmed}, ...old.timeline]
     }));
     showToast('📝','Ghi chú đã lưu','Người kế tiếp sẽ đọc được này');
+    if (!uuid) return;
+    createNoteM.mutate(
+      { leadId: uuid, content: trimmed },
+      {
+        onSuccess: (created) => {
+          if (!created) return;
+          updateTodo(tid, old => ({
+            ...old,
+            notes: old.notes.map(n => n.id === tempId ? { ...n, id: created.id } : n),
+          }));
+        },
+        onError: (err) => {
+          updateTodo(tid, old => ({ ...old, notes: old.notes.filter(n => n.id !== tempId) }));
+          alert('Lưu ghi chú thất bại: ' + (err instanceof Error ? err.message : 'Unknown error'));
+        },
+      },
+    );
   }
+  // Lookup note UUID theo idx trong list note hi\u1ec7n UI (apiNotes n\u1ebfu c\u00f3, fallback local).
+  const resolveNoteId = (tid: number, idx: number): string | undefined => {
+    // Active lead: d\u00f9ng apiNotes (\u0111\u00e3 merge v\u00e0o activeTodoWithNotes UI render).
+    const active = activeTodoWithNotes ?? activeTodoRaw;
+    if (active && active.id === tid) return active.notes[idx]?.id;
+    // Fallback local state
+    return getTodo(tid)?.notes[idx]?.id;
+  };
+
   function saveNoteEdit(tid: number, idx: number, newVal: string) {
-    if (!newVal.trim()) return;
+    const trimmed = newVal.trim();
+    if (!trimmed) return;
+    const uuid = UUID_BY_NUMERIC_ID[tid];
+    const noteUuid = resolveNoteId(tid, idx);
     updateTodo(tid, old => {
       const notes = [...old.notes];
-      notes[idx] = {...notes[idx], text:newVal.trim()};
+      notes[idx] = {...notes[idx], text:trimmed};
       return {...old, notes};
     });
     setEditingNotes(prev => {const n={...prev};delete n[`${tid}-${idx}`];return n;});
+    if (!uuid || !noteUuid || noteUuid.startsWith('temp-')) return;
+    updateNoteM.mutate(
+      { leadId: uuid, noteId: noteUuid, content: trimmed },
+      {
+        onError: (err) => {
+          alert('Sửa ghi chú thất bại: ' + (err instanceof Error ? err.message : 'Unknown error'));
+        },
+      },
+    );
   }
   function deleteNote(tid: number, idx: number) {
+    const uuid = UUID_BY_NUMERIC_ID[tid];
+    const noteUuid = resolveNoteId(tid, idx);
     updateTodo(tid, old => ({...old, notes:old.notes.filter((_,i)=>i!==idx)}));
     setEditingNotes(prev => {const n={...prev};delete n[`${tid}-${idx}`];return n;});
     showToast('🗑','Đã xóa ghi chú','');
+    if (!uuid || !noteUuid || noteUuid.startsWith('temp-')) return;
+    deleteNoteM.mutate(
+      { leadId: uuid, noteId: noteUuid },
+      {
+        onError: (err) => {
+          alert('Xóa ghi chú thất bại: ' + (err instanceof Error ? err.message : 'Unknown error'));
+        },
+      },
+    );
   }
   function toggleCourse(tid: number, courseId: string) {
-    updateTodo(tid, old => {
-      const courses = old.courses.includes(courseId)
-        ? old.courses.filter(c=>c!==courseId)
-        : [...old.courses, courseId];
-      return {...old, courses};
-    });
-    const c = COURSES.find(x=>x.id===courseId);
     const t = getTodo(tid);
-    const adding = !t?.courses.includes(courseId);
+    if (!t) return;
+    const adding = !t.courses.includes(courseId);
+    const nextCourses = adding
+      ? [...t.courses, courseId]
+      : t.courses.filter(c => c !== courseId);
+    const prevCourses = t.courses;
+    // Optimistic
+    updateTodo(tid, old => ({ ...old, courses: nextCourses }));
+    const c = COURSES.find(x=>x.id===courseId);
     if (c) showToast(c.emoji, adding ? `Đã thêm ${c.name}` : `Đã bỏ ${c.name}`, '');
+
+    const uuid = UUID_BY_NUMERIC_ID[tid];
+    if (!uuid) return;
+    // Map course_id -> program_slug, skip n\u1ebfu kh\u00f4ng c\u00f3 mapping (vd course local)
+    const programs = nextCourses
+      .map(cid => COURSE_TO_PROGRAM[cid])
+      .filter((p): p is ProgramSlug => !!p);
+    updateLeadM.mutate(
+      { leadId: uuid, patch: { interested_programs: programs } },
+      {
+        onError: (err) => {
+          updateTodo(tid, old => ({ ...old, courses: prevCourses }));
+          alert('Lưu khóa thất bại: ' + (err instanceof Error ? err.message : 'Unknown error'));
+        },
+      },
+    );
   }
   function toggleGuide(tid: number, idx: number) {
     setGuideChecks(prev => ({
@@ -471,10 +1023,116 @@ export default function App() {
   }
 
   // ─── COMPUTED ─────────────────────────────────────
-  const activeTodo = getTodo(activeId!);
+  const activeTodoRaw = getTodo(activeId!);
+  const activeUuid = activeTodoRaw ? UUID_BY_NUMERIC_ID[activeTodoRaw.id] : undefined;
+  const { data: actionsData } = useLeadActions(activeUuid ?? null);
+  const { data: notesData } = useLeadNotes(activeUuid ?? null);
+  const { data: profileApi } = usePersonalProfile(activeUuid ?? null);
+
+  // Map backend PersonalProfile -> UI ProfileCard shape.
+  function apiToProfileCard(p: BackendPersonalProfile): ProfileCard {
+    const dos = (p.communication_dos ?? []).map(t => ({ y: true, t }));
+    const donts = (p.communication_donts ?? []).map(t => ({ y: false, t }));
+    return {
+      gen: true,
+      dm: p.nhut_chu ?? '—',
+      lp: p.life_path_number != null ? String(p.life_path_number) : '—',
+      nk: p.nine_star ?? '—',
+      sun: p.sun_sign ?? '—',
+      menh: p.menh_cuc ?? '—',
+      gua: '—',
+      q: p.opening_suggestion ?? '',
+      core: p.core_personality ?? '',
+      talk: [...dos, ...donts],
+      need: p.real_need ?? '',
+      timing: p.timing_2026 ?? '',
+      opening: p.opening_suggestion ?? '',
+    };
+  }
+
+  // Sync profile API vào profileCards khi data về (by numeric id).
+  // - profileApi object → populate/overwrite card từ backend
+  // - profileApi null (backend nói "chưa có profile") → clear card để UI
+  //   show "Tạo Personal Profile" state, không để leftover stale data.
+  useEffect(() => {
+    if (!activeTodoRaw) return;
+    if (profileApi === undefined) return; // chưa fetch xong
+    const tid = activeTodoRaw.id;
+    setProfileCards(prev => {
+      if (profileApi === null) {
+        if (!(tid in prev)) return prev;
+        const next = { ...prev };
+        delete next[tid];
+        return next;
+      }
+      return { ...prev, [tid]: apiToProfileCard(profileApi) };
+    });
+    // Khi backend xác nhận profile state, reset dirty — consultant chưa
+    // đổi gì kể từ lần load này.
+    setProfileDirty(false);
+  }, [profileApi, activeTodoRaw]);
+
+  const apiTimeline: TLItem[] = useMemo(() => {
+    if (!actionsData) return [];
+    return actionsData.map((a: PipelineAction): TLItem => ({
+      icon: actionIconOf(a.action_type),
+      action: actionLabelOf(a),
+      date: new Date(a.created_at).toLocaleString('vi-VN'),
+      who: a.performed_by_full_name,
+      note: a.note_content ?? a.regression_reason ?? '',
+    }));
+  }, [actionsData]);
+
+  // N\u1ebfu c\u00f3 API timeline, override timeline c\u1ee7a activeTodo.
+  const activeTodo = activeTodoRaw && apiTimeline.length > 0
+    ? { ...activeTodoRaw, timeline: apiTimeline }
+    : activeTodoRaw;
+
+  // Notes t\u1eeb endpoint GET /notes (c\u00f3 UUID th\u1eadt). Fallback t\u1eeb actions n\u1ebfu endpoint r\u1ed7ng.
+  const apiNotes: NoteItem[] = useMemo(() => {
+    if (notesData && notesData.length > 0) {
+      return notesData.map(n => ({
+        id: n.id,
+        text: n.content,
+        who: n.author_full_name,
+        date: new Date(n.created_at).toLocaleDateString('vi-VN'),
+      }));
+    }
+    return [];
+  }, [notesData]);
+
+  // N\u1ebfu c\u00f3 API notes, override notes c\u1ee7a activeTodo (trong khi gi\u1eef timeline API).
+  const activeTodoWithNotes = activeTodo && apiNotes.length > 0
+    ? { ...activeTodo, notes: apiNotes }
+    : activeTodo;
+
+  // Danh s\u00e1ch teammate (UUID th\u1eadt) derive t\u1eeb leads \u0111\u1ec3 d\u00f9ng trong modal Transfer / Co-deal.
+  const apiTeammates = useMemo(() => {
+    const seen = new Map<string, { id: string; name: string }>();
+    (leads ?? []).forEach(l => {
+      if (!seen.has(l.assigned_to_user_id)) {
+        seen.set(l.assigned_to_user_id, { id: l.assigned_to_user_id, name: l.assigned_to_full_name });
+      }
+    });
+    return Array.from(seen.values());
+  }, [leads]);
+
   const urgent = todos.filter(t => t.priority === 'urgent');
   const today = todos.filter(t => t.priority === 'today');
-  const callTodo = getTodo(callId!);
+
+  // ─── LOAD CAPACITY ─────────────────────────────────
+  // Active = lead chưa done (chưa enrolled/retention) → khớp định nghĩa BE.
+  const activeLoad = todos.filter(t => !t.done).length;
+  const loadPct = Math.min(100, Math.round((activeLoad / LOAD_CAPACITY) * 100));
+  const loadColor = activeLoad >= LOAD_CAPACITY
+    ? 'var(--red)'
+    : activeLoad >= LOAD_CAPACITY * 0.8
+    ? 'var(--amber)'
+    : 'var(--nedu)';
+  const callTodoRaw = getTodo(callId!);
+  const callTodo = callTodoRaw && callTodoRaw.id === activeId
+    ? (activeTodoWithNotes ?? callTodoRaw)
+    : callTodoRaw;
 
   const todayDate = new Date().toLocaleDateString('vi-VN',{weekday:'long',day:'numeric',month:'long'});
 
@@ -482,13 +1140,33 @@ export default function App() {
   const currentLayer = activeTodo ? getFunnelLayer(activeTodo.stage) : null;
 
   // ─── KPI COMPUTED ─────────────────────────────────
-  const totalTarget = teamMembers.reduce((s,m)=>s+m.target,0);
-  const totalEnrolled = teamMembers.reduce((s,m)=>s+m.enrolled,0);
-  const totalRevenue = teamMembers.reduce((s,m)=>s+m.revenue,0);
-  const kpiPct = Math.round((totalEnrolled/totalTarget)*100);
+  // Số liệu summary lấy thẳng từ API (đã tính ở BE để mọi client thống nhất);
+  // chỉ fallback compute từ members nếu BE không trả summary.
+  const kpiSummary = kpiTeamQuery.data?.summary;
+  const totalTarget = kpiSummary?.monthly_target ?? teamMembers.reduce((s,m)=>s+m.target,0);
+  const totalEnrolled = kpiSummary?.enrolled_this_month ?? teamMembers.reduce((s,m)=>s+m.enrolled,0);
+  const totalRevenue = kpiSummary?.monthly_revenue_vnd ?? teamMembers.reduce((s,m)=>s+m.revenue,0);
+  const totalActiveLeads = kpiSummary?.active_leads ?? todos.filter(t=>!t.done).length;
+  const conversionRate = kpiSummary?.conversion_rate ?? Math.round((totalEnrolled/Math.max(todos.length,1))*100);
+  const kpiPct = totalTarget > 0 ? Math.round((totalEnrolled/totalTarget)*100) : 0;
   const sortedTeam = [...teamMembers].sort((a,b)=>b.enrolled-a.enrolled);
 
   // ─── RENDER ───────────────────────────────────────
+  if (leadsLoading && !todosBootstrapped) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg)' }}>
+        <div style={{ color: 'var(--t2)', fontSize: 13 }}>Đang tải dữ liệu…</div>
+      </div>
+    );
+  }
+  if (leadsError && !todosBootstrapped) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'var(--bg)', gap: 8 }}>
+        <div style={{ color: 'var(--red)', fontSize: 14, fontWeight: 700 }}>Không tải được danh sách lead</div>
+        <div style={{ color: 'var(--t3)', fontSize: 12 }}>{leadsError instanceof Error ? leadsError.message : 'Unknown error'}</div>
+      </div>
+    );
+  }
   return (
     <>
       {/* TOPBAR */}
@@ -504,11 +1182,53 @@ export default function App() {
           ))}
         </div>
         <div style={{width:8}}/>
-        <div className="tb-greeting">Chào sáng, <em>Linh</em> ☀️</div>
+        <div className="tb-greeting">Chào sáng, <em>{userFirstName}</em> ☀️</div>
         <div style={{width:8}}/>
         <button className="btn btn-ghost btn-sm" onClick={()=>setShowKPI(true)}>📊 Team KPI</button>
         <div style={{width:6}}/>
-        <div className="tb-avatar">L</div>
+        <div ref={userMenuRef} style={{position:'relative'}}>
+          <div
+            className="tb-avatar"
+            role="button"
+            tabIndex={0}
+            title={user?.email ?? ''}
+            onClick={()=>setShowUserMenu(v=>!v)}
+            onKeyDown={e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();setShowUserMenu(v=>!v);}}}
+            style={{cursor:'pointer'}}
+          >
+            {userInitial}
+          </div>
+          {showUserMenu && (
+            <div
+              style={{
+                position:'absolute',top:'calc(100% + 6px)',right:0,minWidth:220,
+                background:'var(--wh,#fff)',border:'1px solid var(--stone2,#e5e7eb)',
+                borderRadius:10,boxShadow:'0 8px 24px rgba(0,0,0,.12)',padding:6,zIndex:1000,
+              }}
+            >
+              <div style={{padding:'8px 10px',borderBottom:'1px solid var(--stone2,#e5e7eb)',marginBottom:4}}>
+                <div style={{fontSize:12,fontWeight:700,color:'var(--t1,#111)'}}>{user?.full_name ?? 'User'}</div>
+                <div style={{fontSize:11,color:'var(--t3,#6b7280)'}}>{user?.email ?? ''}</div>
+                {user?.primary_role && (
+                  <div style={{fontSize:10,fontFamily:'var(--mono)',color:'var(--t3,#6b7280)',marginTop:2,textTransform:'uppercase'}}>
+                    {user.primary_role}
+                  </div>
+                )}
+              </div>
+              <button
+                onClick={handleLogout}
+                style={{
+                  width:'100%',textAlign:'left',background:'transparent',border:'none',
+                  padding:'8px 10px',borderRadius:6,cursor:'pointer',fontSize:13,color:'var(--red,#DC2626)',
+                }}
+                onMouseEnter={e=>{e.currentTarget.style.background='var(--red-s,#FEE2E2)';}}
+                onMouseLeave={e=>{e.currentTarget.style.background='transparent';}}
+              >
+                🚪 Đăng xuất
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* LAYOUT */}
@@ -521,9 +1241,9 @@ export default function App() {
             <div className="load-bar-wrap">
               <div className="lb-row">
                 <span className="lb-label">Tải công việc</span>
-                <span className="lb-num" style={{color:'var(--amber)'}}>14<span style={{fontSize:10,color:'var(--t3)'}}>/20</span></span>
+                <span className="lb-num" style={{color: loadColor}}>{activeLoad}<span style={{fontSize:10,color:'var(--t3)'}}>/{LOAD_CAPACITY}</span></span>
               </div>
-              <div className="lb-track"><div className="lb-fill" style={{width:'70%'}}/></div>
+              <div className="lb-track"><div className="lb-fill" style={{width:`${loadPct}%`,background:loadColor}}/></div>
             </div>
           </div>
           {/* Urgent section */}
@@ -562,9 +1282,17 @@ export default function App() {
               <FunnelBar t={activeTodo}/>
               {/* Stage Nav */}
               <div className="stage-nav">
-                <button className="sn-back" disabled={activeTodo.stage<=1}
-                  onClick={openBackPopover}>
-                  {activeTodo.stage<=1 ? '← Đầu funnel' : `← ${S_NAMES[activeTodo.stage-2]}`}
+                <button
+                  className="sn-back"
+                  disabled={!canGoBack(activeTodo.stage)}
+                  onClick={openBackPopover}
+                  title={activeTodo.stage===5 ? 'Enrolled không thể lùi stage' : undefined}
+                >
+                  {activeTodo.stage<=1
+                    ? '← Đầu funnel'
+                    : activeTodo.stage===5
+                    ? '🔒 Enrolled — khoá lùi'
+                    : `← ${S_NAMES[activeTodo.stage-2]}`}
                 </button>
                 <div className="sn-stages">
                   {S_NAMES.map((s,i) => {
@@ -591,7 +1319,7 @@ export default function App() {
               {/* Center Body */}
               <div className="center-body">
                 <CenterBody
-                  t={activeTodo}
+                  t={activeTodoWithNotes ?? activeTodo}
                   guideChecks={guideChecks[activeTodo.id]||{}}
                   profileCards={profileCards}
                   onToggleGuide={(idx)=>toggleGuide(activeTodo.id,idx)}
@@ -649,10 +1377,13 @@ export default function App() {
           onEditField={(key)=>setEditingFields(prev=>({...prev,[key]:true}))}
           onSavePF={savePF}
           onSaveBasic={saveBasicField}
+          onSetGender={setGender}
+          onSetConsent={setConsent}
+          onMarkDirty={()=>markDirtyIfGenerated(callTodo.id)}
           profileDirty={profileDirty}
           generatingProfile={generatingProfile}
           onGenProfile={genProfile}
-          onRegenProfile={(id)=>{setProfileDirty(false);genProfile(id);showToast('↻','Đang cập nhật Profile...','Dựa trên thông tin mới nhất');}}
+          onRegenProfile={(id)=>{setProfileDirty(false);genProfile(id, true);showToast('↻','Đang cập nhật Profile...','Dựa trên thông tin mới nhất');}}
           onSendNote={(text)=>sendNote(callTodo.id,text)}
           onEditNote={(idx,val)=>saveNoteEdit(callTodo.id,idx,val)}
           onDeleteNote={(idx)=>deleteNote(callTodo.id,idx)}
@@ -667,15 +1398,21 @@ export default function App() {
       {showEnroll && enrollId && (() => {
         const et = getTodo(enrollId);
         if (!et) return null;
+        const missingEmail = !et.email || !et.email.trim();
         return (
           <div className="enroll-ov" onClick={e=>{if(e.target===e.currentTarget)setShowEnroll(false)}}>
             <div className="enroll-m">
               <div className="em-icon">🎉</div>
               <div className="em-title">Xác nhận Enrolled!</div>
-              <div className="em-sub">Hệ thống sẽ tự động tạo tài khoản và gửi email kích hoạt.</div>
+              <div className="em-sub">Đánh dấu lead đã thanh toán để consultant và hệ thống theo dõi.</div>
+              {missingEmail && (
+                <div style={{background:'rgba(239,68,68,.1)',border:'1px solid rgba(239,68,68,.35)',color:'var(--red,#dc2626)',padding:'10px 12px',borderRadius:8,fontSize:13,marginBottom:12}}>
+                  ⚠️ Lead chưa có email — cập nhật email trước khi Enrolled.
+                </div>
+              )}
               <div className="em-info">
                 <div className="er-row"><span className="er-key">Học viên</span><span className="er-val">{et.name}</span></div>
-                <div className="er-row"><span className="er-key">Email</span><span className="er-val">{et.email}</span></div>
+                <div className="er-row"><span className="er-key">Email</span><span className="er-val" style={missingEmail?{color:'var(--red,#dc2626)'}:undefined}>{et.email || '— chưa có —'}</span></div>
                 <div className="er-row"><span className="er-key">Chương trình</span><span className="er-val">Adult Learning</span></div>
                 <div className="er-row"><span className="er-key">Học phí</span><span className="er-val" style={{color:'var(--green)'}}>70,000,000 ₫</span></div>
               </div>
@@ -710,7 +1447,7 @@ export default function App() {
               </div>
               <div className="em-btns">
                 <button className="btn btn-ghost" onClick={()=>setShowEnroll(false)}>Hủy</button>
-                <button className="btn btn-primary" style={{flex:2,justifyContent:'center'}} onClick={confirmEnroll}>✅ Xác nhận & Tạo tài khoản</button>
+                <button className="btn btn-primary" style={{flex:2,justifyContent:'center',opacity:missingEmail?0.5:1,cursor:missingEmail?'not-allowed':'pointer'}} disabled={missingEmail} onClick={confirmEnroll}>✅ Xác nhận đã thanh toán</button>
               </div>
             </div>
           </div>
@@ -732,15 +1469,12 @@ export default function App() {
               <div>
                 <div className="xm-label">Chuyển cho ai?</div>
                 <select className="xm-select" value={xferTo} onChange={e=>setXferTo(e.target.value)}>
-                  <optgroup label="Leaders">
-                    <option value="minh-leader">Minh Trần · Leader</option>
-                    <option value="hoa-leader">Hoa Lê · Leader</option>
-                  </optgroup>
-                  <optgroup label="Consultants">
-                    <option value="huong">Hương Nguyễn · Consultant</option>
-                    <option value="lan">Lan Phạm · Consultant</option>
-                    <option value="duc">Đức Võ · Consultant</option>
-                  </optgroup>
+                  <option value="">-- Chọn người nhận --</option>
+                  {apiTeammates
+                    .filter(m => m.id !== UUID_BY_NUMERIC_ID[xferLeadId ?? -1] // ko cho ch\u1ecdn ch\u00ednh owner hi\u1ec7n t\u1ea1i
+                      ? true
+                      : true)
+                    .map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                 </select>
                 <div className="xm-label">Lý do chuyển</div>
                 <textarea className="xm-textarea" value={xferReason} onChange={e=>setXferReason(e.target.value)}
@@ -755,10 +1489,7 @@ export default function App() {
                 <div className="xm-label">Thêm người đồng hành</div>
                 <select className="xm-select" value={codealPerson} onChange={e=>setCodealPerson(e.target.value)}>
                   <option value="">-- Chọn --</option>
-                  <option value="huong">Hương Nguyễn</option>
-                  <option value="lan">Lan Phạm</option>
-                  <option value="duc">Đức Võ</option>
-                  <option value="minh-leader">Minh Trần · Leader</option>
+                  {apiTeammates.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                 </select>
                 <div className="xm-label">Tỷ lệ chia hoa hồng</div>
                 <div className="split-row">
@@ -769,7 +1500,7 @@ export default function App() {
                   <span>+</span>
                   <div style={{textAlign:'center',flex:1}}>
                     <div style={{fontSize:10,color:'var(--t3)',fontFamily:'var(--mono)',marginBottom:4}}>
-                      {codealPerson ? teamMembers.find(m=>m.id===codealPerson)?.name?.split(' ')[0]||'Co-dealer' : 'Co-dealer'}
+                      {codealPerson ? apiTeammates.find(m=>m.id===codealPerson)?.name?.split(' ').slice(-1)[0]||'Co-dealer' : 'Co-dealer'}
                     </div>
                     <input type="number" value={100-splitMe} readOnly style={{background:'var(--stone)'}}/>
                   </div>
@@ -789,20 +1520,33 @@ export default function App() {
       )}
 
       {/* KPI PANEL */}
-      {showKPI && (
+      {showKPI && (() => {
+        const monthIso = kpiTeamQuery.data?.month ?? '2026-04';
+        const [yyyy, mm] = monthIso.split('-');
+        const monthLabel = `Tháng ${parseInt(mm,10)}/${yyyy}`;
+        return (
         <div className="kpi-ov" onClick={e=>{if(e.target===e.currentTarget)setShowKPI(false)}}>
           <div className="kpi-panel">
             <div className="kpi-hdr">
               <div>
-                <div className="kpi-hdr-title">📊 Team KPI · Tháng 4/2026</div>
+                <div className="kpi-hdr-title">📊 Team KPI · {monthLabel}</div>
                 <div className="kpi-hdr-sub">Nedu Sales Team · Adult Learning Program</div>
               </div>
               <button className="kpi-close" onClick={()=>setShowKPI(false)}>✕</button>
             </div>
             <div className="kpi-body">
+              {kpiTeamQuery.isLoading && (
+                <div style={{padding:'40px 0',textAlign:'center',color:'var(--t3)',fontSize:13}}>Đang tải KPI…</div>
+              )}
+              {kpiTeamQuery.isError && !kpiTeamQuery.isLoading && (
+                <div style={{padding:'14px 16px',marginBottom:16,background:'var(--amber-s)',border:'1.5px solid var(--amber-b)',borderRadius:'var(--rad)',color:'var(--amber)',fontSize:13}}>
+                  Không tải được KPI. <button onClick={()=>kpiTeamQuery.refetch()} style={{textDecoration:'underline',color:'var(--amber)',background:'none',border:0,cursor:'pointer'}}>Thử lại</button>
+                </div>
+              )}
+              {!kpiTeamQuery.isLoading && !kpiTeamQuery.isError && (<>
               <div className="kpi-month-bar">
                 <div className="kmb-row">
-                  <span className="kmb-label">🎯 Mục tiêu tháng 4 — Toàn team</span>
+                  <span className="kmb-label">🎯 Mục tiêu {monthLabel.toLowerCase()} — Toàn team</span>
                   <span className="kmb-pct">{kpiPct}%</span>
                 </div>
                 <div className="kmb-track"><div className="kmb-fill" style={{width:`${kpiPct}%`}}/></div>
@@ -814,8 +1558,8 @@ export default function App() {
               <div className="kpi-stats-row">
                 <div className="kpi-stat"><div className="ks-n" style={{color:'var(--nedu)'}}>{totalEnrolled}</div><div className="ks-l">Enrolled tháng này</div></div>
                 <div className="kpi-stat"><div className="ks-n" style={{color:'var(--amber)'}}>{(totalRevenue/1000000).toFixed(0)}M</div><div className="ks-l">Doanh thu (₫)</div></div>
-                <div className="kpi-stat"><div className="ks-n" style={{color:'var(--blue)'}}>{todos.filter(t=>!t.done).length}</div><div className="ks-l">Leads đang theo</div></div>
-                <div className="kpi-stat"><div className="ks-n" style={{color:'var(--purple)'}}>{Math.round((totalEnrolled/Math.max(todos.length,1))*100)}%</div><div className="ks-l">Tỷ lệ convert</div></div>
+                <div className="kpi-stat"><div className="ks-n" style={{color:'var(--blue)'}}>{totalActiveLeads}</div><div className="ks-l">Leads đang theo</div></div>
+                <div className="kpi-stat"><div className="ks-n" style={{color:'var(--purple)'}}>{Math.round(conversionRate)}%</div><div className="ks-l">Tỷ lệ convert</div></div>
               </div>
               <div style={{fontSize:11,fontWeight:800,textTransform:'uppercase',letterSpacing:'.1em',color:'var(--t3)',fontFamily:'var(--mono)',marginBottom:10}}>🏆 Bảng xếp hạng</div>
               <div className="kpi-board">
@@ -852,10 +1596,12 @@ export default function App() {
                   ))}
                 </div>
               )}
+              </>)}
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* WIN CELEBRATION */}
       {showWin && (
@@ -910,15 +1656,34 @@ function LeadCard({t, activeId, onSelect, onToggleDone}: {
   const srcBg = t.sourceType==='marketing' ? 'var(--blue-b)' : 'var(--stone)';
   const srcCl = t.sourceType==='marketing' ? 'var(--blue)' : 'var(--t3)';
   const srcLbl = t.sourceType==='marketing' ? '📢 Marketing' : '🌐 Inbound';
+  // Hot=đỏ, Warm=vàng, Cold=xanh dương (lấy từ metadata.temperature).
+  // Undefined: không tô viền (lead chưa được phân loại).
+  const tempBorder = t.temperature === 'hot' ? 'var(--red)'
+    : t.temperature === 'warm' ? 'var(--amber)'
+    : t.temperature === 'cold' ? 'var(--blue)'
+    : undefined;
+  const tempBadge = t.temperature === 'hot'
+    ? { bg: 'var(--red-s)', fg: 'var(--red)', label: '🔥 Hot lead' }
+    : t.temperature === 'warm'
+    ? { bg: 'var(--amber-s)', fg: 'var(--amber)', label: '🌤 Warm lead' }
+    : t.temperature === 'cold'
+    ? { bg: 'var(--blue-s)', fg: 'var(--blue)', label: '❄ Cold lead' }
+    : null;
   return (
-    <div className={`action-item ${uc} ${isA?'active':''} ${t.done?'done':''}`}
-      onClick={()=>onSelect(t.id)}>
+    <div
+      className={`action-item ${uc} ${isA?'active':''} ${t.done?'done':''}`}
+      onClick={()=>onSelect(t.id)}
+      style={tempBorder ? { borderLeft: `4px solid ${tempBorder}` } : undefined}
+    >
       <div className={`ai-check${t.done?' checked':''}`} onClick={e=>onToggleDone(e,t.id)}/>
       <div className="ai-body">
         <div className="ai-action">{t.action}</div>
         <div className="ai-name">{t.name}</div>
         <div className="ai-desc">{t.desc}</div>
         <div className="ai-badges">
+          {tempBadge && (
+            <span className="ai-badge" style={{background:tempBadge.bg,color:tempBadge.fg}}>{tempBadge.label}</span>
+          )}
           <span className="ai-badge" style={{background:bb[t.badgeColor]||'var(--stone)',color:bc[t.badgeColor]||'var(--t2)'}}>{t.badge}</span>
           <span className="ai-badge" style={{background:srcBg,color:srcCl}}>{srcLbl}</span>
         </div>
@@ -1213,7 +1978,7 @@ function NoteMessenger({t, onSendNote, onEditNote, onDeleteNote, onToggleCourse,
 }
 
 // ─── CALL SCREEN ─────────────────────────────────────
-function CallScreen({t, tab, onTabChange, onClose, onSaveClose, profileCards, editingFields, onEditField, onSavePF, onSaveBasic, profileDirty, generatingProfile, onGenProfile, onRegenProfile, onSendNote, onEditNote, onDeleteNote, onToggleCourse, editingNotes, onStartEditNote, onCancelEditNote}: {
+function CallScreen({t, tab, onTabChange, onClose, onSaveClose, profileCards, editingFields, onEditField, onSavePF, onSaveBasic, onSetGender, onSetConsent, onMarkDirty, profileDirty, generatingProfile, onGenProfile, onRegenProfile, onSendNote, onEditNote, onDeleteNote, onToggleCourse, editingNotes, onStartEditNote, onCancelEditNote}: {
   t: Todo; tab: 'info'|'profile';
   onTabChange: (tab:'info'|'profile')=>void;
   onClose: ()=>void; onSaveClose: ()=>void;
@@ -1222,6 +1987,9 @@ function CallScreen({t, tab, onTabChange, onClose, onSaveClose, profileCards, ed
   onEditField: (key:string)=>void;
   onSavePF: (tid:number,key:string,val:string)=>void;
   onSaveBasic: (tid:number,key:string,val:string)=>void;
+  onSetGender: (tid:number,gender:'male'|'female')=>void;
+  onSetConsent: (tid:number,consent:boolean)=>void;
+  onMarkDirty: ()=>void;
   profileDirty: boolean;
   generatingProfile: boolean;
   onGenProfile: (id:number)=>void;
@@ -1286,6 +2054,7 @@ function CallScreen({t, tab, onTabChange, onClose, onSaveClose, profileCards, ed
                         <div className="pf-lbl">{f.label}</div>
                         {isEditing
                           ? <input className="pf-inp" defaultValue={f.val} autoFocus
+                              onChange={e=>{if(e.target.value.trim()!==(f.val||'').trim())onMarkDirty();}}
                               onBlur={e=>onSaveBasic(t.id,f.key,e.target.value)}
                               onKeyDown={e=>{if(e.key==='Enter')(e.target as HTMLInputElement).blur();}}
                               placeholder={f.ph}/>
@@ -1297,7 +2066,7 @@ function CallScreen({t, tab, onTabChange, onClose, onSaveClose, profileCards, ed
                   );
                 })}
               </div>
-              {profileDirty && (
+              {profileDirty && profileCards[t.id]?.gen && (
                 <div className="profile-dirty">
                   <div className="pd-text">✏️ <strong>Hồ sơ đã thay đổi</strong> — cập nhật Personal Profile để tư vấn chính xác hơn</div>
                   <button className="btn btn-sm" style={{background:'var(--amber)',color:'#fff',flexShrink:0}} onClick={()=>onRegenProfile(t.id)}>↻ Cập nhật Profile</button>
@@ -1307,19 +2076,20 @@ function CallScreen({t, tab, onTabChange, onClose, onSaveClose, profileCards, ed
                 <div className={`ps-title${PF_FIELDS.every(f=>(t.profile[f.key as keyof Profile]||'').trim())?' filled':''}`}>🧩 Hồ sơ cá nhân — điền khi gọi</div>
                 {PF_FIELDS.map(f => {
                   const val = t.profile[f.key as keyof Profile] || '';
-                  const filled = !!val.trim();
+                  const filled = typeof val==='string' ? !!val.trim() : !!val;
                   const fKey = `pf-${t.id}-${f.key}`;
                   const isEditing = editingFields[fKey];
-                  const age = f.key==='dob' && val ? calcAge(val) : '';
+                  const age = f.key==='dob' && typeof val==='string' && val ? calcAge(val) : '';
                   return (
                     <div key={f.key} className={`pf-item${filled?' filled':''}${isEditing?' editing-field':''}`}>
                       <div className="pf-icon">{f.icon}</div>
                       <div className="pf-content">
                         <div className="pf-lbl">{f.label}{age && <span style={{color:'var(--green)',fontSize:9,fontFamily:'var(--mono)',marginLeft:3}}>{age}</span>}</div>
                         {filled && !isEditing
-                          ? <div className="pf-val" onClick={()=>onEditField(fKey)}>{val}</div>
-                          : <input className="pf-inp" defaultValue={val} autoFocus={isEditing}
+                          ? <div className="pf-val" onClick={()=>onEditField(fKey)}>{String(val)}</div>
+                          : <input className="pf-inp" defaultValue={typeof val==='string' ? val : ''} autoFocus={isEditing}
                               placeholder={f.ph}
+                              onChange={e=>{if(e.target.value.trim()!==(typeof val==='string'?val.trim():''))onMarkDirty();}}
                               onBlur={e=>onSavePF(t.id,f.key,e.target.value)}
                               onKeyDown={e=>{if(e.key==='Enter')(e.target as HTMLInputElement).blur();}}/>
                         }
@@ -1331,6 +2101,47 @@ function CallScreen({t, tab, onTabChange, onClose, onSaveClose, profileCards, ed
                     </div>
                   );
                 })}
+                {/* Gender — bắt buộc để tính BaZi/Tử Vi/Nine Star Ki chính xác */}
+                <div className={`pf-item${t.profile?.gender?' filled':''}`}>
+                  <div className="pf-icon">⚥</div>
+                  <div className="pf-content">
+                    <div className="pf-lbl">Giới tính <span style={{color:'var(--red)',fontSize:9,fontFamily:'var(--mono)',marginLeft:3}}>bắt buộc</span></div>
+                    <div style={{display:'flex',gap:8,marginTop:4}}>
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        style={{flex:1,borderColor:t.profile?.gender==='male'?'var(--blue)':'var(--stone2)',background:t.profile?.gender==='male'?'var(--blue-b)':'transparent',color:t.profile?.gender==='male'?'var(--blue)':'var(--t2)'}}
+                        onClick={()=>onSetGender(t.id,'male')}
+                      >♂ Nam</button>
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        style={{flex:1,borderColor:t.profile?.gender==='female'?'var(--pink, #EC4899)':'var(--stone2)',background:t.profile?.gender==='female'?'rgba(236,72,153,.1)':'transparent',color:t.profile?.gender==='female'?'#EC4899':'var(--t2)'}}
+                        onClick={()=>onSetGender(t.id,'female')}
+                      >♀ Nữ</button>
+                    </div>
+                  </div>
+                  <div className={`pf-tick${t.profile?.gender?' y':' n'}`}>{t.profile?.gender?'✓':'+'}</div>
+                </div>
+                {/* AI Profile Consent — bắt buộc trước khi gọi vault */}
+                <div className={`pf-item${t.aiProfileConsent?' filled':''}`}>
+                  <div className="pf-icon">🛡️</div>
+                  <div className="pf-content">
+                    <div className="pf-lbl">Consent tạo Personal Profile <span style={{color:'var(--red)',fontSize:9,fontFamily:'var(--mono)',marginLeft:3}}>bắt buộc</span></div>
+                    <div style={{fontSize:11,color:'var(--t2)',lineHeight:1.5,marginTop:3}}>
+                      Prospect đã đồng ý để mình dùng dữ liệu ngày/giờ sinh để tạo profile AI.
+                    </div>
+                    <label style={{display:'inline-flex',alignItems:'center',gap:6,marginTop:6,cursor:'pointer',fontSize:12}}>
+                      <input
+                        type="checkbox"
+                        checked={!!t.aiProfileConsent}
+                        onChange={e=>onSetConsent(t.id,e.target.checked)}
+                      />
+                      <span>Đã có consent</span>
+                    </label>
+                  </div>
+                  <div className={`pf-tick${t.aiProfileConsent?' y':' n'}`}>{t.aiProfileConsent?'✓':'+'}</div>
+                </div>
               </div>
             </div>
             {/* Right col: history */}
@@ -1382,24 +2193,34 @@ function ProfileCardView({t, profileCards, generatingProfile, onGenProfile, onSw
 }) {
   const pc = profileCards[t.id];
   const hasDOB = (t.profile?.dob||'').trim();
+  const hasGender = !!t.profile?.gender;
+  const hasConsent = !!t.aiProfileConsent;
+  const canGenerate = hasDOB && hasGender && hasConsent;
+  const missing: string[] = [];
+  if (!hasDOB) missing.push('Ngày sinh');
+  if (!hasGender) missing.push('Giới tính');
+  if (!hasConsent) missing.push('Consent');
 
   if (generatingProfile) {
     return (
       <div className="pcard-loading">
         <div className="pl-spin"/>
         <div className="pl-txt">Đang tổng hợp...</div>
-        <div className="pl-sub">BaZi · Numerology · Nine Star Ki</div>
+        <div className="pl-sub">BaZi · Tử Vi · Numerology · Nine Star Ki · Western Astrology</div>
+        <div style={{fontSize:10,color:'var(--t3)',marginTop:6}}>Có thể mất 10-15s</div>
       </div>
     );
   }
   if (!pc) {
-    if (hasDOB) {
+    if (canGenerate) {
       return (
         <div style={{padding:24,textAlign:'center'}}>
           <div style={{fontSize:36,marginBottom:10}}>✨</div>
           <div style={{fontSize:15,fontWeight:800,marginBottom:7}}>Sẵn sàng tạo Profile</div>
-          <div style={{fontSize:12,color:'var(--t2)',lineHeight:1.6,maxWidth:220,margin:'0 auto 16px'}}>BaZi + Numerology + Nine Star Ki từ ngày sinh → hướng dẫn tư vấn cá nhân hóa</div>
-          <div style={{fontSize:10,fontFamily:'var(--mono)',background:'var(--stone)',padding:'6px 12px',borderRadius:7,color:'var(--t2)',marginBottom:16,display:'inline-block'}}>✅ {t.profile?.dob} {t.profile?.birthTime?'· '+t.profile.birthTime:''}</div><br/>
+          <div style={{fontSize:12,color:'var(--t2)',lineHeight:1.6,maxWidth:240,margin:'0 auto 16px'}}>5 hệ thống (BaZi, Tử Vi, Nine Star Ki, Numerology, Western Astrology) → briefing sales cá nhân hóa</div>
+          <div style={{fontSize:10,fontFamily:'var(--mono)',background:'var(--stone)',padding:'6px 12px',borderRadius:7,color:'var(--t2)',marginBottom:16,display:'inline-block'}}>
+            ✅ {t.profile?.dob} {t.profile?.birthTime?'· '+t.profile.birthTime:''} · {t.profile?.gender==='male'?'♂ Nam':'♀ Nữ'} · 🛡️ Consent
+          </div><br/>
           <button className="btn btn-ghost" style={{borderColor:'var(--purple-b)',color:'var(--purple)'}} onClick={()=>onGenProfile(t.id)}>✨ Tạo Personal Profile</button>
         </div>
       );
@@ -1408,8 +2229,8 @@ function ProfileCardView({t, profileCards, generatingProfile, onGenProfile, onSw
       <div className="pcard-empty">
         <div className="pe-icon">🧩</div>
         <div className="pe-title">Chưa đủ thông tin</div>
-        <div className="pe-sub">Điền ngày sinh trong tab "Hồ Sơ" trước.</div>
-        <div className="pe-req">Cần: Ngày sinh · Tốt hơn: + Giờ sinh</div>
+        <div className="pe-sub">Cần điền trước khi tạo profile:</div>
+        <div className="pe-req">{missing.join(' · ')}</div>
         <button className="btn btn-ghost btn-sm" onClick={onSwitchToInfo}>← Điền hồ sơ</button>
       </div>
     );
@@ -1423,10 +2244,11 @@ function ProfileCardView({t, profileCards, generatingProfile, onGenProfile, onSw
         <div className="pch-sub">{t.profile?.dob||''} {t.profile?.birthTime?'· '+t.profile.birthTime:''}</div>
         <div className="pch-quote">{pc.q}</div>
         <div className="pch-chips">
-          <div className="pch-chip"><em>{pc.dm}</em></div>
-          <div className="pch-chip">Life {pc.lp}</div>
-          <div className="pch-chip">{pc.nk}</div>
-          <div className="pch-chip">Gua {pc.gua}</div>
+          <div className="pch-chip" title="Bát tự — Nhật Chủ"><em>八 {pc.dm}</em></div>
+          <div className="pch-chip" title="Thần số học — Life Path">🔢 {pc.lp}</div>
+          <div className="pch-chip" title="Nine Star Ki — Year Star">✨ {pc.nk}</div>
+          <div className="pch-chip" title="Cung hoàng đạo — Sun sign">♈ {pc.sun}</div>
+          <div className="pch-chip" title="Tử vi — Mệnh Cục">🀄 {pc.menh}</div>
         </div>
       </div>
       <div className="pi-blk">
