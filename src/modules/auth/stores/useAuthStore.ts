@@ -5,8 +5,10 @@ import {
   redirectToGoogleLogin,
   logout as authCentralLogout,
 } from '@shared/config/auth-central-client'
+import { scheduleProactiveRefresh } from '@shared/config/proactive-refresh'
 import type { AuthUser } from '@shared/types/auth'
 import { analytics } from '@shared/analytics'
+import { env } from '@shared/config/env'
 
 function syncAnalytics(user: AuthUser | null) {
   if (user) {
@@ -16,7 +18,6 @@ function syncAnalytics(user: AuthUser | null) {
   }
 }
 
-const IS_MOCK = import.meta.env.VITE_ENABLE_MOCKING === 'true'
 const MOCK_UID_KEY = 'mock_uid'
 // consultant-01 — default dev persona
 const DEFAULT_MOCK_ID = 'c3d4e5f6-a7b8-4012-9def-345678901234'
@@ -57,7 +58,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
       set({ isLoading: true })
 
       // ── Mock mode: skip auth-central; MSW returns mock /auth/me by localStorage UID ──
-      if (IS_MOCK) {
+      if (env.IS_MOCK) {
         if (!localStorage.getItem(MOCK_UID_KEY)) {
           localStorage.setItem(MOCK_UID_KEY, DEFAULT_MOCK_ID)
         }
@@ -78,7 +79,7 @@ export const useAuthStore = create<AuthState>((set, get) => {
     },
 
     loginWithGoogle: async () => {
-      if (IS_MOCK) {
+      if (env.IS_MOCK) {
         localStorage.setItem(MOCK_UID_KEY, DEFAULT_MOCK_ID)
         const user = await fetchMe()
         set({ user })
@@ -98,13 +99,16 @@ export const useAuthStore = create<AuthState>((set, get) => {
 
     acceptTokens: async (tokens) => {
       tokenStorage.set(tokens)
+      // Proactive refresh: schedule rotation 60s trước access expire
+      // (vd TTL 15m → fire ~14m sau accept). Replace reactive-only flow.
+      scheduleProactiveRefresh()
       const user = await fetchMe()
       set({ user })
       syncAnalytics(user)
     },
 
     logout: async () => {
-      if (IS_MOCK) {
+      if (env.IS_MOCK) {
         localStorage.removeItem(MOCK_UID_KEY)
         set({ user: null })
         syncAnalytics(null)
